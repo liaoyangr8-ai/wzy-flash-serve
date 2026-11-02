@@ -1,0 +1,473 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WZY Flash Serve · 实时监控与启动控制台</title>
+  <link rel="icon" href="/web/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/web/style.css">
+  <script>
+    try {
+      const t = localStorage.getItem("wzy.theme") || "dark";
+      document.documentElement.dataset.theme = t;
+    } catch (e) {}
+  </script>
+</head>
+<body>
+
+<header class="st-header">
+  <div class="st-brand">
+    <span class="st-brand__logo">⚡</span>
+    <span>WZY Flash Serve</span>
+    <span class="st-brand__sub" id="hdr-arch">2×2080Ti 22G · SM75 NVFP4</span>
+  </div>
+
+  <nav class="st-tabs" role="tablist" aria-label="主视图">
+    <button class="st-tab" role="tab" id="tab-monitor" aria-selected="true" data-tab="monitor">监控大盘 Monitor</button>
+    <button class="st-tab" role="tab" id="tab-launcher" aria-selected="false" data-tab="launcher">启动器与端口 Launcher</button>
+    <button class="st-tab" role="tab" id="tab-chat" aria-selected="false" data-tab="chat">对话测试 Chat</button>
+    <button class="st-tab" role="tab" id="tab-about" aria-selected="false" data-tab="about">接口连接 API</button>
+  </nav>
+
+  <span class="st-header__spacer"></span>
+
+  <div class="st-header__right">
+    <button class="st-btn st-btn--port" id="hdr-port-btn" title="点击配置或热切换服务端口">API 端口 :11438</button>
+
+    <span class="st-pill" id="hdr-pill" data-state="idle" role="status">
+      <span class="st-pill__dot"></span>
+      <span id="hdr-pill-text">连接中…</span>
+    </span>
+
+    <button class="st-btn st-btn--primary" id="hdr-start-btn" title="启动双卡 CUDA 引擎" disabled>启动引擎</button>
+    <button class="st-btn st-btn--danger" id="hdr-stop-btn" title="关闭引擎并释放 44 GiB 双卡显存" disabled>关闭引擎</button>
+    <button class="st-btn" id="hdr-restart-btn" title="重启引擎">重启</button>
+    <button class="st-btn" id="hdr-theme-btn" title="切换深色/浅色主题">深/浅色</button>
+  </div>
+</header>
+
+<main>
+  <!-- ============================ 1. MONITOR VIEW ============================ -->
+  <section id="view-monitor" class="view">
+    <!-- Model State Banner (Strata style) -->
+    <div class="st-card state-card">
+      <div class="state-card__head">
+        <span class="card-title">引擎实时状态 Model State</span>
+        <div class="badges" id="state-badges">
+          <span class="st-badge" data-s="stopped">已停止 Stopped</span>
+          <span class="st-badge" data-s="booting">启动中 Booting</span>
+          <span class="st-badge" data-s="idle">空闲就绪 Idle</span>
+          <span class="st-badge" data-s="reading">预填充 Reading (Prefill)</span>
+          <span class="st-badge" data-s="generating">解码生成 Generating (Decode)</span>
+        </div>
+      </div>
+      <div class="state-card__row">
+        <span id="state-label">正在连接监控服务…</span>
+        <span class="muted mono" id="state-detail">—</span>
+      </div>
+      <div class="st-progress" id="state-progress">
+        <div class="st-progress__bar" id="state-bar" style="width: 0%"></div>
+      </div>
+    </div>
+
+    <!-- 8-Card Hero Telemetry Grid -->
+    <div class="metrics-grid">
+      <div class="metric-card metric-card--hero-dec">
+        <div class="metric-card__top">
+          <span>实时 Decode 速度</span>
+          <span class="mono" id="m-dec-tag">实时 / 本轮</span>
+        </div>
+        <div class="metric-card__val mono"><span id="m-dec-tps">—</span><small>tok/s</small></div>
+        <div class="metric-card__sub" id="m-dec-sub">会话均值 — tok/s · 累计 0 tok</div>
+      </div>
+
+      <div class="metric-card metric-card--hero-pf">
+        <div class="metric-card__top">
+          <span>Prefill 预填充速度</span>
+          <span class="mono" id="m-pf-tag">新读吞吐</span>
+        </div>
+        <div class="metric-card__val mono"><span id="m-pf-tps">—</span><small>tok/s</small></div>
+        <div class="metric-card__sub" id="m-pf-sub">最近 Prompt — tok (复用 —)</div>
+      </div>
+
+      <div class="metric-card">
+        <div class="metric-card__top">
+          <span>MTP 投机草稿接受率</span>
+          <span class="mono">Q2_0 · K=6</span>
+        </div>
+        <div class="metric-card__val mono"><span id="m-mtp-acc">—</span><small>%</small></div>
+        <div class="metric-card__sub" id="m-mtp-sub">命中 — / 提议 — 草稿 token</div>
+      </div>
+
+      <div class="metric-card">
+        <div class="metric-card__top">
+          <span>VRAM 专家命中率</span>
+          <span class="mono">零专家跳过</span>
+        </div>
+        <div class="metric-card__val mono"><span id="m-vram-hit">—</span><small>%</small></div>
+        <div class="metric-card__sub" id="m-vram-sub">13,224 常驻槽 · 动态晋升 0</div>
+      </div>
+
+      <div class="metric-card">
+        <div class="metric-card__top">
+          <span>双卡 GPU 算力负载</span>
+          <span class="mono" id="m-clock-tag">SM 1800 MHz</span>
+        </div>
+        <div class="metric-card__val mono"><span id="m-gpu-util">0% / 0%</span></div>
+        <div class="metric-card__sub" id="m-gpu-split">PP2 切分 L0..23 | L24..47</div>
+      </div>
+
+      <div class="metric-card">
+        <div class="metric-card__top">
+          <span>双卡 GDDR6 显存</span>
+          <span class="mono">44.0 GiB 总量</span>
+        </div>
+        <div class="metric-card__val mono"><span id="m-vram-gib">—</span><small>GiB</small></div>
+        <div class="metric-card__sub" id="m-vram-cards">G0: — MiB · G1: — MiB</div>
+      </div>
+
+      <div class="metric-card">
+        <div class="metric-card__top">
+          <span>双卡温度 & 功耗</span>
+          <span class="mono">上限 2×250W</span>
+        </div>
+        <div class="metric-card__val mono"><span id="m-temp-pwr">—°C / —W</span></div>
+        <div class="metric-card__sub" id="m-temp-sub">G0: —°C —W · G1: —°C —W</div>
+      </div>
+
+      <div class="metric-card">
+        <div class="metric-card__top">
+          <span>系统内存 & 监听端口</span>
+          <span class="mono">DDR3-1867 ECC</span>
+        </div>
+        <div class="metric-card__val mono"><span id="m-ram-gib">—</span><small>GiB</small></div>
+        <div class="metric-card__sub" id="m-port-sub">API :11438 · 控制台 :11439</div>
+      </div>
+    </div>
+
+    <!-- Oscilloscope + 256K Context Gauge Row -->
+    <div class="osc-ctx-row">
+      <div class="st-card">
+        <div class="osc-head">
+          <div>
+            <span class="card-title">实时 Token 速率示波器 (最近 120 秒 · 1Hz 采样)</span>
+            <span class="muted small" style="margin-left:10px" id="osc-live-note">等待请求流…</span>
+          </div>
+          <div class="osc-legend">
+            <span><i class="leg-dot" style="background:var(--st-accent)"></i>实时 Decode (tok/s)</span>
+            <span><i class="leg-dot" style="background:var(--st-info)"></i>Prefill 脉冲 (tok/s)</span>
+          </div>
+        </div>
+        <div class="osc-wrap">
+          <svg class="osc-svg" id="osc-svg" viewBox="0 0 720 190" preserveAspectRatio="none">
+            <defs>
+              <linearGradient id="grad-dec" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stop-color="var(--st-accent)" stop-opacity="0.38"/>
+                <stop offset="100%" stop-color="var(--st-accent)" stop-opacity="0.0"/>
+              </linearGradient>
+            </defs>
+            <!-- Grid lines -->
+            <line x1="0" y1="35" x2="720" y2="35" stroke="var(--st-line-soft)" stroke-dasharray="3 3"/>
+            <line x1="0" y1="85" x2="720" y2="85" stroke="var(--st-line-soft)" stroke-dasharray="3 3"/>
+            <line x1="0" y1="135" x2="720" y2="135" stroke="var(--st-line-soft)" stroke-dasharray="3 3"/>
+            <line x1="0" y1="175" x2="720" y2="175" stroke="var(--st-line)"/>
+            <g id="osc-pf-bars"></g>
+            <path id="osc-dec-area" fill="url(#grad-dec)" d=""/>
+            <path id="osc-dec-line" fill="none" stroke="var(--st-accent)" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" d=""/>
+            <text x="8" y="28" fill="var(--st-ink-muted)" font-size="11" font-family="monospace" id="osc-ymax">80 tok/s</text>
+            <text x="8" y="80" fill="var(--st-ink-muted)" font-size="11" font-family="monospace" id="osc-ymid">40 tok/s</text>
+            <text x="8" y="170" fill="var(--st-ink-muted)" font-size="11" font-family="monospace">0 tok/s</text>
+          </svg>
+        </div>
+      </div>
+
+      <div class="st-card">
+        <div class="req-head" style="margin-bottom:4px">
+          <span class="card-title">256K 上下文与缓存水位 Context Fill</span>
+          <span class="muted small mono" id="ctx-cap-label">Max 262,144</span>
+        </div>
+        <div class="ctx-layout">
+          <div class="ctx-gauge">
+            <svg class="st-gauge" viewBox="0 0 120 120" aria-hidden="true">
+              <circle class="st-gauge__track" cx="60" cy="60" r="50" fill="none" stroke-width="10" stroke-linecap="round"
+                      stroke-dasharray="235.6 314.2" transform="rotate(135 60 60)"/>
+              <circle class="st-gauge__fill" id="ctx-fill" cx="60" cy="60" r="50" fill="none" stroke-width="10"
+                      stroke-linecap="round" stroke-dasharray="0 314.2" transform="rotate(135 60 60)"/>
+            </svg>
+            <div class="ctx-gauge__label">
+              <span class="ctx-gauge__pct mono" id="ctx-pct">0%</span>
+              <span class="muted small mono" id="ctx-sub">0 tok</span>
+            </div>
+          </div>
+
+          <div class="ctx-bars">
+            <div>
+              <div class="bar-row"><span>GDDR6 驻留专家槽位</span><span class="muted mono" id="bar-slots-txt">13,224 / 24,576</span></div>
+              <div class="st-progress"><div class="st-progress__bar" id="bar-slots-fill" style="width:53.8%"></div></div>
+            </div>
+            <div>
+              <div class="bar-row"><span>32K+4K Sink 显存 KV 环</span><span class="muted mono" id="bar-kv-txt">0 / 32,768</span></div>
+              <div class="st-progress"><div class="st-progress__bar" id="bar-kv-fill" style="width:0%"></div></div>
+            </div>
+            <div>
+              <div class="bar-row"><span>系统锁页内存 (DDR3)</span><span class="muted mono" id="bar-ram-txt">— / 94.3 GiB</span></div>
+              <div class="st-progress"><div class="st-progress__bar" id="bar-ram-fill" style="width:0%"></div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Dual GPU Strip -->
+    <div class="gpu-grid">
+      <div class="gpu-item">
+        <div class="gpu-item__head">
+          <span class="card-title" id="g0-title">GPU 0 · NVIDIA GeForce RTX 2080 Ti 22GB</span>
+          <span class="muted small mono" id="g0-role">Stage 0 (Layers 0..23 + PLE · 6,923 槽)</span>
+        </div>
+        <div class="gpu-bars">
+          <div>
+            <div class="bar-row"><span>显存占用 VRAM</span><span class="mono" id="g0-vram-txt">— / 22,528 MiB</span></div>
+            <div class="st-progress"><div class="st-progress__bar" id="g0-vram-bar" style="width:0%"></div></div>
+          </div>
+          <div>
+            <div class="bar-row"><span>核心负载 / 温度 / 功耗</span><span class="mono" id="g0-stat-txt">0% · —°C · —W</span></div>
+            <div class="st-progress" data-tone="warn"><div class="st-progress__bar" id="g0-util-bar" style="width:0%"></div></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="gpu-item">
+        <div class="gpu-item__head">
+          <span class="card-title" id="g1-title">GPU 1 · NVIDIA GeForce RTX 2080 Ti 22GB</span>
+          <span class="muted small mono" id="g1-role">Stage 1 (Layers 24..47 + Head + MTP · 6,301 槽)</span>
+        </div>
+        <div class="gpu-bars">
+          <div>
+            <div class="bar-row"><span>显存占用 VRAM</span><span class="mono" id="g1-vram-txt">— / 22,528 MiB</span></div>
+            <div class="st-progress"><div class="st-progress__bar" id="g1-vram-bar" style="width:0%"></div></div>
+          </div>
+          <div>
+            <div class="bar-row"><span>核心负载 / 温度 / 功耗</span><span class="mono" id="g1-stat-txt">0% · —°C · —W</span></div>
+            <div class="st-progress" data-tone="warn"><div class="st-progress__bar" id="g1-util-bar" style="width:0%"></div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Recent Requests Table (Strata Monitor Table + Click-to-Inspect) -->
+    <div class="st-card">
+      <div class="req-head">
+        <div>
+          <span class="card-title">请求实时监控与历史明细 Recent Requests</span>
+          <span class="muted small" style="margin-left:10px">点击任意请求行可展开查看输入 Prompt、&lt;think&gt; 思考过程与输出内容</span>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center">
+          <button class="st-btn" id="btn-reset-kv" title="清空引擎单槽 KV 前缀缓存">清空 KV 缓存</button>
+        </div>
+      </div>
+
+      <div class="table-wrap">
+        <table class="st-table">
+          <thead>
+            <tr>
+              <th>时间 Time</th>
+              <th>状态 Status</th>
+              <th class="num">Prompt 总长</th>
+              <th class="num">缓存复用 Reused</th>
+              <th class="num">新读 Read</th>
+              <th class="num">输出 Output</th>
+              <th class="num" title="扣除前缀缓存复用后的真实新读 Prefill 速度">Prefill t/s</th>
+              <th class="num" title="生成阶段 Decode 吞吐速度">Decode t/s</th>
+              <th class="num" title="MTP 投机草稿接受率 (accepted / offered)">MTP 接受率</th>
+              <th class="num" title="解码期间 GDDR6 显存专家命中率">VRAM 命中率</th>
+              <th class="num">耗时 Duration</th>
+            </tr>
+          </thead>
+          <tbody id="req-tbody">
+            <tr><td colspan="11" class="muted" style="text-align:center;padding:24px">暂无请求记录，API 调用将自动实时显示在此处</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="muted small" id="req-summary" style="margin:10px 0 0">累计请求: 0</p>
+
+      <!-- Request Detail Inspector -->
+      <div class="req-inspector" id="req-inspector" hidden>
+        <div class="req-head" style="margin-bottom:8px">
+          <span class="card-title mono" id="insp-title">请求详情</span>
+          <button class="st-btn" id="insp-close">收起详情</button>
+        </div>
+        <div class="inspector-tabs">
+          <button class="st-btn" data-ipane="output" aria-selected="true">模型输出 Output</button>
+          <button class="st-btn" data-ipane="reasoning" aria-selected="false">思考过程 Reasoning (&lt;think&gt;)</button>
+          <button class="st-btn" data-ipane="input" aria-selected="false">输入预览 Input</button>
+          <button class="st-btn" data-ipane="timings" aria-selected="false">耗时与投机指标 JSON</button>
+          <button class="st-btn" id="insp-copy" style="margin-left:auto">复制内容</button>
+        </div>
+        <pre class="inspector-pre" id="insp-content"></pre>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================ 2. LAUNCHER & PORT VIEW ============================ -->
+  <section id="view-launcher" class="view" hidden>
+    <div class="launcher-grid">
+      <!-- Left: Launcher & Port Configuration -->
+      <div class="st-card">
+        <div class="req-head">
+          <span class="card-title">引擎启动器与服务端口配置 Engine Launcher & Port Control</span>
+          <span class="muted small mono" id="lch-state-badge">状态: —</span>
+        </div>
+        <p class="muted small" style="margin-top:0">
+          WebUI 控制台进程常驻仅占 ~25 MiB 内存（0 显存）。点击<strong>“关闭引擎”</strong>可立即释放全部 44 GiB 双卡显存供其它任务使用，随时可在网页中一键重新启动。修改<strong>服务端口</strong>支持毫秒级热切换（无需重启 76 秒引擎）。
+        </p>
+
+        <!-- Port Switcher Box -->
+        <div style="padding:14px;border-radius:10px;background:var(--st-surface-2);border:1px solid var(--st-line);margin-bottom:14px">
+          <div class="card-title" style="margin-bottom:10px">1. 服务端口设置 (支持在线热切换，无需重启引擎)</div>
+          <div class="form-grid" style="margin-top:0">
+            <div class="st-field">
+              <label for="cfg-port">主服务端口 Primary API Port <span class="mono muted">OpenAI / WebUI</span></label>
+              <input class="st-input mono" id="cfg-port" type="number" min="1024" max="65535" value="11438">
+            </div>
+            <div class="st-field">
+              <label for="cfg-mirrors">附加镜像端口 Mirror Ports <span class="mono muted">逗号分隔，可选</span></label>
+              <input class="st-input mono" id="cfg-mirrors" type="text" placeholder="例如: 11437">
+            </div>
+          </div>
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-top:12px;gap:10px;flex-wrap:wrap">
+            <span class="muted small mono" id="lch-active-ports">当前监听端口: :11438, :11439 (固定控制端口)</span>
+            <button class="st-btn st-btn--primary" id="btn-apply-port" type="button">立即切换服务端口 (热切换)</button>
+          </div>
+        </div>
+
+        <!-- Engine & Sampling Parameters -->
+        <div class="card-title">2. 双卡引擎硬件参数与 MTP 投机采样设置</div>
+        <div class="form-grid">
+          <div class="st-field">
+            <label for="cfg-split">PP2 双卡切分层 (WZY_SPLIT) <span class="mono muted">需重启生效</span></label>
+            <input class="st-input mono" id="cfg-split" type="number" min="16" max="32" value="24">
+          </div>
+          <div class="st-field">
+            <label for="cfg-ctx">最大上下文长度 (WZY_CTX) <span class="mono muted">最高 262144</span></label>
+            <select class="st-input mono" id="cfg-ctx">
+              <option value="262144">262,144 (256K 满血)</option>
+              <option value="131072">131,072 (128K)</option>
+              <option value="65536">65,536 (64K)</option>
+              <option value="32768">32,768 (32K)</option>
+            </select>
+          </div>
+          <div class="st-field">
+            <label for="cfg-adapt">每卡动态晋升专家槽 (WZY_ADAPT_SLOTS) <span class="mono muted">需重启生效</span></label>
+            <input class="st-input mono" id="cfg-adapt" type="number" min="0" max="4096" step="256" value="2048">
+          </div>
+          <div class="st-field">
+            <label for="cfg-threads">CPU 专家 AVX2 线程数 (WZY_CPU_THREADS) <span class="mono muted">推荐 14</span></label>
+            <input class="st-input mono" id="cfg-threads" type="number" min="1" max="32" value="14">
+          </div>
+          <div class="st-field">
+            <label for="cfg-spec">MTP 投机草稿步数 (spec_k) <span class="mono muted">实时生效 · 0..6</span></label>
+            <input class="st-input mono" id="cfg-spec" type="number" min="0" max="6" value="6">
+          </div>
+          <div class="st-field">
+            <label for="cfg-spec-minp">MTP 草稿置信门限 (spec_min_p) <span class="mono muted">实时生效 · 推荐 0.72</span></label>
+            <input class="st-input mono" id="cfg-spec-minp" type="number" min="0.1" max="0.99" step="0.02" value="0.72">
+          </div>
+          <div class="st-field">
+            <label for="cfg-temp">默认温度 (temperature) <span class="mono muted">实时生效</span></label>
+            <input class="st-input mono" id="cfg-temp" type="number" min="0.0" max="2.0" step="0.05" value="0.3">
+          </div>
+          <div class="st-field">
+            <label for="cfg-autoload">引擎停止后收到 API 请求自动唤醒 <span class="mono muted">Auto-Load</span></label>
+            <select class="st-input" id="cfg-autoload">
+              <option value="false">关闭 (手动在启动器控制启停)</option>
+              <option value="true">开启 (收到请求自动拉起引擎)</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="launcher-actions">
+          <button class="st-btn st-btn--primary" id="lch-btn-start" type="button">▶ 启动引擎 (Start Engine)</button>
+          <button class="st-btn st-btn--danger" id="lch-btn-stop" type="button">■ 关闭引擎释放显存 (Stop Engine)</button>
+          <button class="st-btn" id="lch-btn-restart" type="button">↻ 应用参数并重启引擎 (Restart)</button>
+          <button class="st-btn" id="lch-btn-save-only" type="button">仅保存采样/实时参数</button>
+        </div>
+      </div>
+
+      <!-- Right: Live Boot Progress & Engine Console Logs -->
+      <div class="st-card">
+        <div class="req-head">
+          <span class="card-title">引擎启动进度与实时控制台日志 Engine Console Logs</span>
+          <button class="st-btn" id="btn-refresh-logs" type="button">刷新日志</button>
+        </div>
+        <div class="state-card__row" style="margin-top:4px">
+          <span id="lch-boot-stage" class="small">就绪</span>
+          <span id="lch-boot-pct" class="mono small muted">100%</span>
+        </div>
+        <div class="st-progress">
+          <div class="st-progress__bar" id="lch-boot-bar" style="width:100%"></div>
+        </div>
+        <pre class="log-box" id="lch-log-box">正在加载引擎日志…</pre>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================ 3. CHAT & BENCH VIEW ============================ -->
+  <section id="view-chat" class="view" hidden>
+    <div class="chat-layout">
+      <div class="chat-main">
+        <div class="chat-messages" id="chat-messages">
+          <div class="muted" style="text-align:center;margin:auto" id="chat-empty">
+            <div style="font-size:18px;font-weight:700;color:var(--st-ink);margin-bottom:6px">在线流式对话与速度实测</div>
+            <div>直接在浏览器中测试 Qwen3.8-Flash-Next NVFP4，实时显示思维链 (&lt;think&gt;)、Prefill 与 Decode 速度</div>
+          </div>
+        </div>
+        <div class="chat-composer">
+          <textarea id="chat-input" placeholder="输入问题或点击右侧快捷测速指令（Enter 发送，Shift+Enter 换行）…"></textarea>
+          <button class="st-btn st-btn--primary" id="chat-send" style="padding:0 22px">发送</button>
+        </div>
+      </div>
+
+      <div class="st-card" style="display:flex;flex-direction:column;gap:14px">
+        <div class="card-title">对话参数 & 快捷测速</div>
+        <div class="st-field">
+          <label><input type="checkbox" id="chat-think" checked> 启用深度思考 (&lt;think&gt;)</label>
+        </div>
+        <div class="st-field">
+          <label for="chat-temp">温度 Temperature</label>
+          <input class="st-input mono" id="chat-temp" type="number" value="0.3" step="0.1" min="0" max="1.5">
+        </div>
+        <div class="st-field">
+          <label for="chat-max">最大生成 Tokens</label>
+          <input class="st-input mono" id="chat-max" type="number" value="512" step="64" min="16" max="16384">
+        </div>
+        <button class="st-btn" id="chat-clear">清空对话并重置 KV</button>
+
+        <hr style="border:0;border-top:1px solid var(--st-line);width:100%;margin:4px 0">
+        <div class="card-title">一键测速预设 Prompts</div>
+        <button class="st-btn" data-prompt="Write a complete C++17 lock-free MPMC ring buffer with ABA tagged pointers and unit tests.">英文 C++ 高速 Decode 测速</button>
+        <button class="st-btn" data-prompt="请用中文详细推导 FlashAttention-2 的在线 Softmax 分块递推公式，并给出 CUDA Warp 归约伪代码实现。">中文长文推导 Decode 测速</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================ 4. API & ABOUT VIEW ============================ -->
+  <section id="view-about" class="view" hidden>
+    <div class="launcher-grid">
+      <div class="st-card">
+        <span class="card-title">OpenAI 兼容接口地址 (随所选端口自动更新)</span>
+        <p class="muted small">支持 DeepSeek Harness、Cursor、Claude Code (OpenAI 桥接)、OpenWebUI 及任何标准 OpenAI SDK 客户端直接连接：</p>
+        <pre class="inspector-pre" id="api-endpoints-box"></pre>
+      </div>
+      <div class="st-card">
+        <span class="card-title">引擎架构与硬件信息</span>
+        <pre class="inspector-pre" id="about-hw-box"></pre>
+      </div>
+    </div>
+  </section>
+</main>
+
+<div class="st-toast" id="toast" hidden></div>
+<script src="/web/app.js"></script>
+</body>
+</html>

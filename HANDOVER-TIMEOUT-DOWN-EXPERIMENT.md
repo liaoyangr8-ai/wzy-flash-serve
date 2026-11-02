@@ -1,0 +1,8 @@
+# Vision timeout fix and MoE down shared-index experiment
+
+- Production engine restored: SHA256 bc7ff81feef016c31437f93b87f3a479318225912a6b37196f473893de6caa25. Kernel source unchanged.
+- Vision timeout fix deployed: serve/vision.py SHA256 c0231bc53c2c350f2b81f99755676b07847d1265c8fe99d40d840f03929e9fe7. Old source backup /tmp/wzy-vision-before-timeout-fix.py. A reader thread and per-process queue enforce monotonic deadlines; timeout kills the encoder to prevent stale responses.
+- Mock startup timeout, encoder timeout, process exit, and subsequent successful startup passed. Post-restart responses_text and chat_two_tools passed; single image 4271 and two images 4271/ZX-88 passed. Check production traffic before any restart.
+- Experimental files /tmp/wzy-downshared-experiment: down kernel expert indices in shared memory; 75 -> 64 registers, 0 spills. 48 layers x T=1..8 x 3 modes plus exit stress: FAIL_COUNT=0 (matrix.log). It was not retained in production.
+- Same three prompts x 512 tokens, one round each: baseline 67.21, 58.42, 65.48 tok/s (mean 63.70); candidate 65.84, 55.37, 67.20 (mean 62.80). Speculative acceptance and expert hit rates differed, so one round is not conclusive; no demonstrated gain. Raw baseline.json and candidate.json contain predicted_per_second (older script incorrectly reports tps=None).
+- CORS: localhost:8080 preflight allowed; example.com preflight omitted Access-Control-Allow-Origin. Add the actual trusted page origin to config.json cors_origins if needed; do not blindly allow all, especially while enforce_api_key is false. HTTPS to HTTP may also be blocked as mixed content.

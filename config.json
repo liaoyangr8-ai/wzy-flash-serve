@@ -1,0 +1,53 @@
+{
+  "engine_bin": "/home/liaoyang/wzy-flash-serve/bin/wzy_pp2_engine",
+  "model_name": "qwen3.8-flash-next-gptq-nvfp4",
+  "port": 11438,
+  "mirror_ports": [],
+  "launcher_port": 11439,
+  "auto_load": false,
+  "start_on_boot": false,
+  "api_key": "dummy",
+  "enforce_api_key": false,
+  "cors_origins": [
+    "http://localhost:8080",
+    "http://127.0.0.1:8080",
+    "http://localhost:11438",
+    "http://127.0.0.1:11438",
+    "http://localhost:11439",
+    "http://127.0.0.1:11439"
+  ],
+  "default_max_tokens": 2048,
+  "vision": {
+    "exe": "/home/liaoyang/layftllm/strata-0151/build-vision/bin/strata-vision",
+    "mmproj": "/home/liaoyang/models/Maximilian228--Qwen3.8-Flash-Next-NVFP4-GPTQ-Strata/mmproj-BF16.gguf",
+    "model": "/home/liaoyang/models/Maximilian228--Qwen3.8-Flash-Next-NVFP4-GPTQ-Strata/qwen-nvfp4-gptq-dense.gguf",
+    "gpu": false,
+    "threads": 8,
+    "max_tokens": 1024,
+    "dir": "/tmp/wzy-vision"
+  },
+  "sampling": {
+    "temperature": 0.3,
+    "top_p": 0.75,
+    "top_k": 15,
+    "min_p": 0.02,
+    "repetition_penalty": 1.0,
+    "spec": 7,
+    "spec_min_p": 0.72
+  },
+  "env": {
+    "WZY_SPLIT": "25",
+    "WZY_CTX": "262144",
+    "WZY_RESERVE_MIB": "150",
+    "WZY_ADAPT_SLOTS": "6144",
+    "WZY_CORE_KEEP": "2048",
+    "WZY_PROMO_PER_WIN": "4",
+    "WZY_PROMO_SCAN": "256",
+    "WZY_PROMO_MIN_F": "4",
+    "WZY_PROMO_QUEUE": "16",
+    "WZY_CPU_THREADS": "14",
+    "WZY_DEC_PROF": "1",
+    "WZY_SPEC_DEPTH": "7",
+    "WZY_PIPE_TOK": "0"
+  }
+}

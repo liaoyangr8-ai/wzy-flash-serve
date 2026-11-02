@@ -1,0 +1,3 @@
+# AI handover - WZY
+
+This is a source snapshot renamed from the former project name to WZY, including environment variables, identifiers, filenames and UI text. The renamed code has not been built or tested. No engine binary or model weights are included. Start by reading README.md and DEPLOYMENT-SOP.md; inspect the target Linux machine, model paths and CUDA dependencies. Run ./build.sh and test text, protocol and vision before deployment. Original environment: two 22GB RTX 2080 Ti, AVX2/FMA CPU and approximately 94 GiB RAM. Vision also requires a compatible strata-vision executable and mmproj model. Config is a template; set correct paths and secure API authentication before exposing the service.

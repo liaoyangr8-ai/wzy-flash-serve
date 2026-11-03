@@ -826,7 +826,7 @@ struct StageGpu {
             }
             CHECK(cudaSetDevice(dev));
             int promoted = 0;
-            static const int env_max_promo = std::getenv("WZY_PROMO_PER_WIN") ? std::max(1, std::atoi(std::getenv("WZY_PROMO_PER_WIN"))) : 4;
+            static const int env_max_promo = std::getenv("WZY_PROMO_PER_WIN") ? std::max(1, std::atoi(std::getenv("WZY_PROMO_PER_WIN"))) : 8;
             static const int env_max_scan = std::getenv("WZY_PROMO_SCAN") ? std::max(16, std::atoi(std::getenv("WZY_PROMO_SCAN"))) : 256;
             const int max_promo = env_max_promo;
             const int max_scans = std::min(adapt_cap, env_max_scan);

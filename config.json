@@ -41,7 +41,7 @@
     "WZY_RESERVE_MIB": "150",
     "WZY_ADAPT_SLOTS": "6144",
     "WZY_CORE_KEEP": "2048",
-    "WZY_PROMO_PER_WIN": "4",
+    "WZY_PROMO_PER_WIN": "8",
     "WZY_PROMO_SCAN": "256",
     "WZY_PROMO_MIN_F": "4",
     "WZY_PROMO_QUEUE": "16",

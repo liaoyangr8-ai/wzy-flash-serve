@@ -1,6 +1,6 @@
 # IMPORTANT: renamed source package
 
-This package contains no prebuilt engine. Run ./build.sh on a compatible Linux/CUDA machine before starting. Older statements below about a bundled binary describe the original deployment, not this package. The WZY names and environment variables were mechanically renamed; this version has not yet been compiled or tested. Adapt config.json and model/vision paths before use.
+This package contains no prebuilt engine. Run ./build.sh on a compatible Linux/CUDA machine before starting. Older statements below about a bundled binary describe the original deployment, not this package. The WZY names and environment variables were mechanically renamed. The tree compiles cleanly with nvcc 12.8 (-arch=sm_75), but this version has not been runtime-tested. Adapt config.json and model/vision paths before use.
 
 > **Public source snapshot:** Model weights, prebuilt engine, `data/*.bin` draft vocabulary and expert profiles are not included. The data provenance and redistribution terms require separate verification; obtain or generate compatible files before use. References to bundled binaries or profiles below describe the original deployment only.
 

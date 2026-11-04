@@ -95,34 +95,67 @@ chmod +x build.sh start.sh stop.sh status.sh
   同一张图按内容哈希缓存，重复请求不再编码。
 - 接线与排障见 [DEPLOYMENT-SOP.md](./DEPLOYMENT-SOP.md) 第五节；关闭只需删掉 `config.json` 的 `"vision"` 段（收到图片会明确报错，不会静默丢图）。
 
-## 四、投机接受策略（`WZY_TYP_RANK` / `WZY_TYP_MARGIN`）
+## 四、投机接受策略与复读防线（`WZY_TYP_*` / `WZY_LOOP_*`）
 
-默认 `WZY_TYP_RANK=1` 即为**完全精确的无偏投机验证**（原行为，逐 token 不变）。
+### 4.1 默认即精确验证
 
-开启后草稿 token 落在目标模型 top-16 候选的**前 R 名**内即被接受；`WZY_TYP_MARGIN` 再叠一道 logit 分差护栏——仅当 `top_v[0] - top_v[r] <= margin` 时放行第 r 名，target 本身笃定的位置自动退回只认 argmax。被接受的草稿本来就是窗口里已算完的行，**接受与否不增加任何 GPU 计算**。
+`WZY_TYP_RANK=1`（默认）就是完全精确的无偏投机验证，逐 token 不变。
 
-**⚠️ 单位陷阱（最容易踩）**：`top_v[]` 是 `row_top16_multi_kernel` 直接对 **raw logits** 取 top-16 的结果，**没有除以 temperature**（`cfg.temp` 只在之后的 softmax 里生效）。所以护栏的真实严格度是 `margin / T`：
+**作用范围**：所有开关仅影响 `temperature > 0` 的流量。`temp <= 1e-5` 时引擎走 `fast_greedy` 的 GPU argmax 分支（`row_argmax_multi_kernel`），**根本不进验证函数**，因此 Agent / 代码工具链的贪心输出不受任何影响。
 
-- `margin=1.8`、`T=0.3` → 有效分差 6.0 → 第 2 名概率比 ≤ `e^-6 ≈ 1/400`，**看起来设了，实际等于关掉**；
-- 想让"概率比 ≥ `e^-4 ≈ 1.8%`"的位置放行，raw 值应取 `4·T`（T=0.3 时 ≈1.2）。但实测更松的 `5.0` 仍能干净拦下错例，**请以实测为准，别按直觉填**；
-- 同一 margin 在更高温度下更宽松（`T` 变大 → `margin/T` 变小），换温度需重新标定。
+### 4.2 三个开关
 
-实测标定（10 道可验证问答 × 3–5 次 + 6 题 384-token 吞吐基准，T=0.3，双 RTX 2080 Ti 22GB）：
+| 变量 | 含义 | 默认 |
+| :--- | :--- | :---: |
+| `WZY_TYP_RANK` | 草稿 token 落在目标模型 top-16 候选的前 R 名内即接受；`1` = 精确 | `1` |
+| `WZY_TYP_MARGIN` | logit 分差护栏：仅当 `top_v[0] - top_v[r] <= margin` 时才放行第 r 名 | `5.0`（RANK=1 时不生效） |
+| `WZY_TYP_MAX_SLACK` | **每个投机窗口内**允许的“非 argmax 妥协”次数上限；`0` = 只认 argmax | `0` |
+| `WZY_TANDEM_GUARD` | 检测 history 尾部 `X^m` 型重复，命中则把“下一个循环 token”在 top_v 上压 −6.0；仅 temp>0 | `1` |
 
-| `WZY_TYP_RANK` | `WZY_TYP_MARGIN` | 质量 | decode mean / 中位 (tok/s) |
-| :---: | :---: | :---: | :---: |
-| 1（关闭） | – | 100% | 61.00 / 61.20 |
-| 3 | 关闭 | 97.5% | 75.42 / 75.44 |
-| 3 | 2.0 | 100% | 71.06 / 71.03 |
-| 3 | 3.0 | 100% | 73.53 / 73.90 |
-| 3 | 5.0 | 100% | 76.08 / 75.95 |
-| **8** | **5.0** | **100%** | **79.19 / 80.88** |
+**⚠️ 单位陷阱**：`top_v[]` 是 `row_top16_multi_kernel` 直接对 **raw logits** 取 top-16 的结果，**没有除 temperature**。护栏真实严格度是 `margin / T`：`T=0.3` 时 `margin=1.8` 已经意味着第二名概率比 ≤ `e^-6 ≈ 1/400`，**看起来设了实际等于关掉**。请按实测标定，不要按直觉填。
 
-推荐 `WZY_TYP_RANK=8` + `WZY_TYP_MARGIN=5.0`（相对基线 **+33% 中位吞吐、质量无损**；长文实测中文 836 token @ 96.58 tok/s、英文 900 token @ 93.44 tok/s，20-gram 重复率 < 0.7%）。想完全回滚把 `WZY_TYP_RANK` 设为 `1` 或删掉这两个键即可。
+### 4.3 实测（temp=0.3，2× RTX 2080 Ti 22GB）
 
-**作用范围**：仅影响 `temperature > 0` 的流量。`temp <= 1e-5` 时引擎走 `fast_greedy` 的 GPU argmax 分支（`row_argmax_multi_kernel`），**根本不进验证函数**，因此 Agent / 代码工具链的贪心输出逐 token 不变。
+三组工作负载：普通长文（中文/英文/环形队列代码）、**复读诱因**（枚举 / 配置表 / boilerplate 代码）、长上下文（34,873 token）。表中为 20-gram 重复率（越低越好）与 decode 速度。
 
-> **口径说明：** 上表数值实测自同源的 `LJQ_` 命名构建（双 RTX 2080 Ti 22GB，`temperature=0.3`，10 道可验证问答 × 3–5 次）。本仓库是机械重命名（`ljq`→`wzy`）版本，按文首说明尚未在本机编译验证；重命名不改变逻辑，但具体数值请以你自己编译实测为准。
+| 配置 | 中文长文 | 英文长文 | 环形队列代码 | **boilerplate 代码** | 速度 tok/s |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| **RANK=1（默认）** | 0.000% | 0.894% | 0.233% | **0.000%** | 66–78 |
+| RANK=8, margin=5.0 | 0.000% | 0.000% | 11.534% | **53.700%** | 87–110 |
+| RANK=8, margin=1.0 | 0.000% | 0.000% | 0.000% | **53.700%** | 84–87 |
+| RANK=3, margin=1.5, slack=1 | 0.000% | 0.000% | 0.526% | 3.232% | 70–82 |
+| RANK=8, margin=1.0, slack=1 | 0.000% | 0.000% | 0.000% | 6.544% | 66–83 |
+| RANK=8, margin=5.0, **slack=0** | — | — | — | **0.000%** | 57 |
+
+结论（均为实测，非推断）：
+
+1. **复读完全由“非 argmax 接受”驱动**。`slack=0` 时把 rank/margin 全部放宽到 8 / 5.0，boilerplate 重复率仍是 0.000%；只要允许非 argmax 接受，boilerplate 就会崩。
+2. `WZY_TYP_MAX_SLACK` 是最有效的一刀：53.7% → 3.2%（**16×**），但仍压不回基线 0.000%。
+3. **提速与零复读在本模型上不可兼得**。收紧到能压制复读时，速度（66–83）与 RANK=1（66–78）已重叠。所以**生产默认 RANK=1**，三个开关留给实验。
+4. 34,873 token 长上下文下所有配置重复率均为 0.000%，**长上下文不是复读诱因**。
+5. 单样本方差很大（同一 boilerplate 任务在 slack=1 下测到 3.2% 与 6.5%），切勿用单次结果下结论。
+
+> 口径说明：上表数据实测于 `WZY_` 命名构建（双 RTX 2080 Ti 22GB，`temperature=0.3`）。
+
+### 4.4 第三层防线：输出侧复读熔断（默认开启）
+
+`serve/server.py` 的 `LoopGuard`：在最近 `W`=768 个生成 token 内，若同一个 `G`=48 token 的块出现 `R`=3 次，判定进入复读吸引子 → 向引擎发 `SIGUSR1`（与客户端中断同一路径），引擎正常收尾，请求以 `finish_reason="stop"` + `loop_guard: true` 结束。
+
+- 配置：`config.json` 顶层 `"loop_guard": {"enabled": true, "gram": 48, "repeats": 3, "window": 768}`，或 env `WZY_LOOP_GUARD` / `WZY_LOOP_GRAM` / `WZY_LOOP_REPEATS` / `WZY_LOOP_WINDOW`；`WZY_LOOP_GUARD=0` 关闭。
+- 实测：把阈值调到 4/2/64 时，一个要求重复 40 行的请求在 **16 token** 被截断（本该 600 token），`finish_reason=stop`；恢复默认阈值后，400 token 正常生成**零误触发**。
+- 意义：无论复读来自模型自身还是接受策略，都不会再烧掉 18k token。
+
+### 4.5 CUDA graph：实测后否决
+
+层循环体内 46 个 kernel × 24 层 = **每阶段 1,104 次 launch**，且 0 个 `cudaStreamSynchronize`、0 个同步 `cudaMemcpy`，看起来是 graph 的理想对象。微基准（单卡空 kernel，1,104 次）实测：
+
+| 项目 | 实测 |
+| :--- | :---: |
+| 逐次发射 | **1.848 ms**（1.67 µs/launch） |
+| 同样 1,104 节点的图回放 | 1.081 ms |
+| 每阶段净省 | **0.767 ms**（每窗口 1.53 ms ≈ **3.4–4.6%**） |
+
+**结论：不值得。** 每阶段 ≈13 ms 的“与行数无关”开销不是发射间隙，而是 1,104 个小 kernel 的真实 GPU 执行时间（≈11 µs/个，每层都要再把权重读一遍）。要动它必须改内核或合批，不是 graph。
 
 ---
 

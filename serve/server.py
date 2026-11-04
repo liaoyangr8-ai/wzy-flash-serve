@@ -25,6 +25,72 @@ import frontend as fe  # noqa: E402
 import responses as rp  # noqa: E402
 import vision as vision_mod  # noqa: E402
 
+class LoopGuard:
+    """Detect degenerate repetition in a token stream.
+
+    A healthy completion does not emit the same long gram three times inside a few hundred
+    tokens. When it does, the model has fallen into a repetition attractor and every further
+    token is wasted work.
+    """
+
+    def __init__(self, gram=48, repeats=3, window=768):
+        self.gram = max(2, int(gram))
+        self.repeats = max(2, int(repeats))
+        self.window = max(self.gram * self.repeats, int(window))
+        self.buf = []
+        self.since = 0
+
+    def push(self, tid):
+        """Append one token id; return True when the stream is degenerate."""
+        self.buf.append(int(tid))
+        if len(self.buf) > self.window:
+            del self.buf[: len(self.buf) - self.window]
+        self.since += 1
+        if len(self.buf) < self.gram * self.repeats or self.since < self.gram:
+            return False
+        # Only scan once per gram-sized stride: cheap and still catches the attractor fast.
+        self.since = 0
+        g = self.gram
+        tail = self.buf[-g:]
+        hits = 0
+        n = len(self.buf)
+        for i in range(n - g, -1, -1):
+            if self.buf[i:i + g] == tail:
+                hits += 1
+                if hits >= self.repeats:
+                    return True
+        return False
+
+
+def loop_guard_config():
+    """(enabled, gram, repeats, window) from os.environ, then config.json, then defaults."""
+    sec = CONFIG.get("loop_guard") if isinstance(CONFIG, dict) else None
+    sec = sec if isinstance(sec, dict) else {}
+
+    def num(key, env, default):
+        if env in os.environ:
+            try:
+                return int(os.environ[env])
+            except ValueError:
+                pass
+        if key in sec:
+            try:
+                return int(sec[key])
+            except (TypeError, ValueError):
+                pass
+        return default
+
+    enabled = True
+    if "WZY_LOOP_GUARD" in os.environ:
+        enabled = os.environ["WZY_LOOP_GUARD"].strip() not in ("0", "false", "False", "off")
+    elif "enabled" in sec:
+        enabled = bool(sec["enabled"])
+    return (enabled,
+            num("gram", "WZY_LOOP_GRAM", 48),
+            num("repeats", "WZY_LOOP_REPEATS", 3),
+            num("window", "WZY_LOOP_WINDOW", 768))
+
+
 def read_host_sys():
     """Read Linux /proc/meminfo & /proc/stat with zero external dependencies."""
     ram_total_gib = 94.3
@@ -661,6 +727,9 @@ class EngineSupervisor:
             }
             pf_data = {}
             done_received = False
+            loop_tripped = False
+            _lg_on, _lg_gram, _lg_rep, _lg_win = loop_guard_config()
+            loop_guard = LoopGuard(_lg_gram, _lg_rep, _lg_win) if _lg_on else None
             try:
                 self.proc.stdin.write(payload)
                 self.proc.stdin.flush()
@@ -690,6 +759,20 @@ class EngineSupervisor:
                         now_t = time.time()
                         self._tok_times.append(now_t)
                         self.current_stat["generated"] += 1
+                        if loop_guard is not None and not loop_tripped and loop_guard.push(tid):
+                            loop_tripped = True
+                            self.current_stat["loop_guard"] = True
+                            self._log(
+                                "[wzy-serve] LOOP GUARD tripped on %s after %d tokens "
+                                "(a %d-token block repeated %d times within %d); aborting turn"
+                                % (req_id, self.current_stat.get("generated", 0),
+                                   _lg_gram, _lg_rep, _lg_win)
+                            )
+                            try:
+                                if self.proc is not None and self.proc.poll() is None:
+                                    os.kill(self.proc.pid, signal.SIGUSR1)
+                            except Exception:
+                                pass
                         yield ("token", tid)
                     elif s.startswith("DONE "):
                         done_received = True
@@ -721,6 +804,11 @@ class EngineSupervisor:
                             "conv_entries": len(self.conv_cache),
                         }
                         rec = dict(dn)
+                        if loop_tripped:
+                            # The engine reports "cancelled"; for the client this was a deliberate,
+                            # successful stop, so surface it as a normal finish with a flag.
+                            rec["loop_guard"] = True
+                            rec["finish"] = "stop"
                         rec["id"] = req_id
                         rec["path"] = meta.get("path", "/v1/chat/completions")
                         rec["stream"] = bool(meta.get("stream", True))
@@ -866,7 +954,7 @@ PORT_MGR = None
 CONFIG = {}
 
 
-class WzyHandler(BaseHTTPRequestHandler):
+class LjqHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def log_message(self, fmt, *args):
@@ -1981,7 +2069,7 @@ def main():
     mirror_ports = [int(p) for p in CONFIG.get("mirror_ports", []) if int(p) != primary_port]
     launcher_port = int(CONFIG.get("launcher_port", 11439))
 
-    PORT_MGR = PortManager(host, WzyHandler)
+    PORT_MGR = PortManager(host, LjqHandler)
     PORT_MGR.sync_ports(primary_port, mirror_ports, launcher_port)
 
     SUPERVISOR = EngineSupervisor(CONFIG, cfg_path)

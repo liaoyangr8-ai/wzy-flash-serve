@@ -49,8 +49,10 @@
     "WZY_DEC_PROF": "1",
     "WZY_SPEC_DEPTH": "7",
     "WZY_PIPE_TOK": "0",
-    "WZY_TYP_RANK": "8",
-    "WZY_TYP_MARGIN": "5.0"
+    "WZY_TYP_RANK": "1",
+    "WZY_TYP_MARGIN": "5.0",
+    "WZY_TYP_MAX_SLACK": "0",
+    "WZY_TANDEM_GUARD": "1"
   },
-  "_env_notes": "WZY_TYP_RANK / WZY_TYP_MARGIN = speculative 'top-R acceptance' + logit-margin guard. MARGIN IS IN RAW LOGIT UNITS (temperature is NOT divided out), so real strictness = margin / T. At T=0.3: margin=1.8 -> 2nd-place probability ratio ~1/400 (the feature is effectively off); margin=5.0 is the measured knee. Recommended: RANK=8 MARGIN=5.0 (+33% decode throughput vs RANK=1, quality unchanged). Roll back to exact verification with RANK=1 (or delete both keys). Only affects temperature > 0 traffic -- temp=0 takes the fast_greedy GPU-argmax path and never reaches the verification function. See README section 4."
+  "_env_notes": "WZY_TYP_RANK / WZY_TYP_MARGIN / WZY_TYP_MAX_SLACK = speculative acceptance knobs. MARGIN IS IN RAW LOGIT UNITS (temperature is NOT divided out), so real strictness = margin / T; at T=0.3 margin=1.8 means a 1/400 probability ratio, i.e. the feature is effectively off. Production default is RANK=1 (exact, lossless): measurements show every non-argmax acceptance can push code generation into repetition (boilerplate task: 0.000% -> 53.700% duplicate 20-gram). MAX_SLACK caps non-argmax acceptances per window and cuts that to 3.2%, but never back to baseline, and once tightened enough the speed matches RANK=1. Kept for experiments only. LoopGuard (serve/server.py, on by default) stops a degenerate turn after ~48 tokens of repetition: config.json top-level loop_guard {gram,repeats,window} or WZY_LOOP_* env; WZY_LOOP_GUARD=0 disables. Only affects temperature > 0 traffic -- temp=0 takes the fast_greedy GPU-argmax path and never reaches the verification function. See README section 4."
 }

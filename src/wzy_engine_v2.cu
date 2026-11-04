@@ -181,7 +181,8 @@ static bool verify_or_resample(const float* logits, int nvocab, const GenCfg& cf
 // Zero-PCIe-D2H exact unbiased speculative verification & sampling using GPU-extracted descending Top-16 `(top_v, top_i)`!
 static bool verify_or_resample_top16(const float* raw_top_v, const int* raw_top_i, const GenCfg& cfg,
                                      const std::vector<int>& history, size_t gen_start,
-                                     int draft_tok, int& out_tok, std::mt19937& rng) {
+                                     int draft_tok, int& out_tok, std::mt19937& rng,
+                                     int* slack_left = nullptr) {
     const int k = std::min(16, cfg.top_k > 0 ? cfg.top_k : 16);
     float top_v[16];
     int top_i[16];
@@ -251,11 +252,18 @@ static bool verify_or_resample_top16(const float* raw_top_v, const int* raw_top_
     // probability ratio of e^-6 ~ 1/400, which effectively disables the whole feature. Calibrate by
     // measurement, not by intuition; 5.0 is the measured knee at T=0.3 (see README section 4).
     static const float typ_margin = std::getenv("WZY_TYP_MARGIN") ? (float) std::atof(std::getenv("WZY_TYP_MARGIN")) : 0.0f;
-    if (typ_rank > 1 && draft_tok >= 0) {
-        const int rr = std::min(typ_rank, k);
+    // WZY_TYP_MAX_SLACK: per-window budget of sub-argmax acceptances. Once the budget is spent the
+    // remaining rows of the same window fall back to strict argmax, so a draft cannot chain several
+    // low-probability repetition tokens inside one window and drag the context into a loop.
+    const int allow_rank = (slack_left == nullptr || *slack_left > 0) ? typ_rank : 1;
+    if (allow_rank > 1 && draft_tok >= 0) {
+        const int rr = std::min(allow_rank, k);
         for (int i = 0; i < rr; ++i) {
             if (top_i[i] != draft_tok) continue;
-            if (i > 0 && typ_margin > 0.f && (top_v[0] - top_v[i]) > typ_margin) break;
+            if (i > 0) {
+                if (typ_margin > 0.f && (top_v[0] - top_v[i]) > typ_margin) break;
+                if (slack_left != nullptr) --(*slack_left);
+            }
             out_tok = draft_tok;
             return true;
         }
@@ -2017,14 +2025,21 @@ int main() {
             return false;
         };
 
+        // Per-window budget of sub-argmax acceptances (WZY_TYP_MAX_SLACK). Reset when a new window
+        // starts (j == 0) so every window gets the same allowance.
+        int typ_slack_left = 0;
+        static const int typ_max_slack = std::getenv("WZY_TYP_MAX_SLACK")
+                                       ? std::atoi(std::getenv("WZY_TYP_MAX_SLACK")) : -1;
         auto verify_one_row = [&](int j, int d_cand, int& sampled) -> bool {
+            if (j == 0) typ_slack_left = (typ_max_slack < 0) ? 0x7fffffff : typ_max_slack;
             if (fast_greedy) {
                 sampled = stages.back().h_greedy_ids[j];
                 return (d_cand >= 0 && d_cand == sampled);
             } else if (want_top16) {
                 return verify_or_resample_top16(stages.back().h_top16_val + j * 16,
                                                 stages.back().h_top16_id + j * 16,
-                                                cfg, history, (size_t) nprompt, d_cand, sampled, rng);
+                                                cfg, history, (size_t) nprompt, d_cand, sampled, rng,
+                                                &typ_slack_left);
             } else {
                 return verify_or_resample(h_logits + (size_t) j * NVOCAB, NVOCAB, cfg, history, d_cand, sampled, rng);
             }

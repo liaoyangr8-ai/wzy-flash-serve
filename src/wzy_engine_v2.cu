@@ -158,6 +158,17 @@ static bool verify_or_resample(const float* logits, int nvocab, const GenCfg& cf
         out_tok = ids[0];
         return (draft_tok >= 0 && draft_tok == ids[0]);
     }
+    static const int typ_rank_v = std::getenv("WZY_TYP_RANK") ? std::atoi(std::getenv("WZY_TYP_RANK")) : 1;
+    static const float typ_margin_v = std::getenv("WZY_TYP_MARGIN") ? (float) std::atof(std::getenv("WZY_TYP_MARGIN")) : 0.0f;
+    if (typ_rank_v > 1 && draft_tok >= 0) {
+        const int rr = std::min(typ_rank_v, (int) ids.size());
+        for (int i = 0; i < rr; ++i) {
+            if (ids[i] != draft_tok) continue;
+            if (i > 0 && typ_margin_v > 0.f) break;   // full-vocab path has no logits here: stay strict
+            out_tok = draft_tok;
+            return true;
+        }
+    }
     const int sampled = draw_from_dist(ids, probs, rng);
     if (draft_tok < 0) {
         out_tok = sampled;
@@ -225,6 +236,28 @@ static bool verify_or_resample_top16(const float* raw_top_v, const int* raw_top_
             }
             top_v[j + 1] = v;
             top_i[j + 1] = id;
+        }
+    }
+    // WZY_TYP_RANK>1: Medusa/vLLM-style "top-R acceptance" -- accept the drafted token when it lands
+    // inside the target's top-R candidates instead of demanding an exact argmax / exact resample hit.
+    // rank<=1 keeps the original, bit-exact speculative verification.
+    static const int typ_rank = std::getenv("WZY_TYP_RANK") ? std::atoi(std::getenv("WZY_TYP_RANK")) : 1;
+    // WZY_TYP_MARGIN: logit-margin guard. A non-argmax draft is only honoured while the target is
+    // genuinely undecided about the top candidates (top_v[0] - top_v[i] <= margin). Where the target
+    // is confident by a wide margin, only its argmax is accepted (bit-exact behaviour there).
+    // UNIT: top_v[] comes straight from row_top16_multi_kernel, i.e. RAW logits -- temperature is NOT
+    // divided out here (cfg.temp is only applied later, in the softmax below). So the effective
+    // strictness of this knob is (margin / T): at T=0.3 a margin of 1.8 already means a second-place
+    // probability ratio of e^-6 ~ 1/400, which effectively disables the whole feature. Calibrate by
+    // measurement, not by intuition; 5.0 is the measured knee at T=0.3 (see README section 4).
+    static const float typ_margin = std::getenv("WZY_TYP_MARGIN") ? (float) std::atof(std::getenv("WZY_TYP_MARGIN")) : 0.0f;
+    if (typ_rank > 1 && draft_tok >= 0) {
+        const int rr = std::min(typ_rank, k);
+        for (int i = 0; i < rr; ++i) {
+            if (top_i[i] != draft_tok) continue;
+            if (i > 0 && typ_margin > 0.f && (top_v[0] - top_v[i]) > typ_margin) break;
+            out_tok = draft_tok;
+            return true;
         }
     }
     if (cfg.temp <= 1e-5f) {

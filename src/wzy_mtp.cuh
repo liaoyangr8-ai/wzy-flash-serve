@@ -699,7 +699,7 @@ struct MtpEngine {
 
         quant_act_multi<<<((NE / 16) + 127) / 128, 128, 0, stream>>>(mixed.p, xq32, xs32, nullptr, nullptr, NE, 1);
         launch_gemm_bf16(router_w.p, mixed.p, slog.p, NEXP, NE, 1, stream);
-        router_top10_fast_multi<<<1, 256, 0, stream>>>(slog.p, (int*) sids.p, swts.p);
+        router_top10_fast_multi<<<1, 256, 0, stream>>>(slog.p, (int*) sids.p, swts.p, nullptr, nullptr, nullptr, 0);
 
         // Shared expert
         launch_gemm_q8p(sh_gate.p, sh_gate.s, xq32, xs32, sff.p, NFF, NE, 1, stream);

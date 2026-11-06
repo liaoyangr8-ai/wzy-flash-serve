@@ -1,7 +1,7 @@
 {
   "engine_bin": "/home/liaoyang/wzy-flash-serve/bin/wzy_pp2_engine",
   "model_name": "qwen3.8-flash-next-gptq-nvfp4",
-  "port": 11438,
+  "port": 11437,
   "mirror_ports": [],
   "launcher_port": 11439,
   "auto_load": false,
@@ -11,12 +11,19 @@
   "cors_origins": [
     "http://localhost:8080",
     "http://127.0.0.1:8080",
-    "http://localhost:11438",
-    "http://127.0.0.1:11438",
+    "http://localhost:11437",
+    "http://127.0.0.1:11437",
     "http://localhost:11439",
     "http://127.0.0.1:11439"
   ],
   "default_max_tokens": 2048,
+  "batch": {
+    "enabled": false,
+    "engine_bin": "/home/liaoyang/wzy-flash-serve/bin/wzy_batch_engine",
+    "slots": 2,
+    "ctx": 32768,
+    "_notes": "Concurrent multi-session engine (bin/wzy_batch_engine). enabled=false keeps the 256K + MTP single-stream path. When enabled: N resident sessions decode on private streams, cold experts are shared, promotion is deferred per round, and multi-turn prefix reuse is by full-prefix match (no park/restore). Trade-offs: no MTP/speculation and ctx is capped at the VRAM KV ring (32768) because this engine has no host KV mirror. slots is clamped by free VRAM at boot."
+  },
   "vision": {
     "exe": "/home/liaoyang/layftllm/strata-0151/build-vision/bin/strata-vision",
     "mmproj": "/home/liaoyang/models/Maximilian228--Qwen3.8-Flash-Next-NVFP4-GPTQ-Strata/mmproj-BF16.gguf",
@@ -41,18 +48,21 @@
     "WZY_RESERVE_MIB": "150",
     "WZY_ADAPT_SLOTS": "6144",
     "WZY_CORE_KEEP": "2048",
-    "WZY_PROMO_PER_WIN": "8",
+    "WZY_PROMO_PER_WIN": "16",
     "WZY_PROMO_SCAN": "256",
-    "WZY_PROMO_MIN_F": "4",
-    "WZY_PROMO_QUEUE": "16",
+    "WZY_PROMO_MIN_F": "2",
+    "WZY_PROMO_QUEUE": "64",
     "WZY_CPU_THREADS": "14",
     "WZY_DEC_PROF": "1",
-    "WZY_SPEC_DEPTH": "7",
+    "WZY_SPEC_DEPTH": "2",
+    "WZY_SPEC_MIN_P": "0.50",
+    "WZY_ADAPT_DEPTH": "1",
     "WZY_PIPE_TOK": "0",
     "WZY_TYP_RANK": "1",
     "WZY_TYP_MARGIN": "5.0",
     "WZY_TYP_MAX_SLACK": "0",
-    "WZY_TANDEM_GUARD": "1"
+    "WZY_TANDEM_GUARD": "0",
+    "WZY_SPEC_GATE": "0.7"
   },
   "_env_notes": "WZY_TYP_RANK / WZY_TYP_MARGIN / WZY_TYP_MAX_SLACK = speculative acceptance knobs. MARGIN IS IN RAW LOGIT UNITS (temperature is NOT divided out), so real strictness = margin / T; at T=0.3 margin=1.8 means a 1/400 probability ratio, i.e. the feature is effectively off. Production default is RANK=1 (exact, lossless): measurements show every non-argmax acceptance can push code generation into repetition (boilerplate task: 0.000% -> 53.700% duplicate 20-gram). MAX_SLACK caps non-argmax acceptances per window and cuts that to 3.2%, but never back to baseline, and once tightened enough the speed matches RANK=1. Kept for experiments only. LoopGuard (serve/server.py, on by default) stops a degenerate turn after ~48 tokens of repetition: config.json top-level loop_guard {gram,repeats,window} or WZY_LOOP_* env; WZY_LOOP_GUARD=0 disables. Only affects temperature > 0 traffic -- temp=0 takes the fast_greedy GPU-argmax path and never reaches the verification function. See README section 4."
 }

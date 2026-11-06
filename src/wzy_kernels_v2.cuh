@@ -987,7 +987,10 @@ __global__ void __launch_bounds__(512) fused_gdn_step_norm_multi(
 // ZERO-FP64 PARALLEL ROUTER TOP-10 (replaces slow FP64 serial router_topk!)
 // ==================================================================
 __global__ void router_top10_fast_multi(const float* __restrict__ logits, int* __restrict__ ids,
-                                        float* __restrict__ wts) {
+                                        float* __restrict__ wts,
+                                        const unsigned short* __restrict__ sg_w,
+                                        const float* __restrict__ sg_x, float* __restrict__ sg_out,
+                                        int sg_cols) {
     const int t = blockIdx.x;
     const float* x = logits + (size_t) t * NEXP;
     int* out_id = ids + (size_t) t * TOPK;
@@ -1028,6 +1031,28 @@ __global__ void router_top10_fast_multi(const float* __restrict__ logits, int* _
     sp[tid] = e0 * inv_s;
     sp[tid + 256] = e1 * inv_s;
     __syncthreads();
+
+    // F1b: warp 1 is idle from here on -- it computes the rows=1 shared-expert gate dot product with
+    // the exact gemm_bf16_t rows=1 accumulation order (bit-identical), saving one launch per layer.
+    if (warp == 1 && sg_w != nullptr) {
+        const uint4* w4 = (const uint4*) sg_w;
+        const float* xt = sg_x + (size_t) t * sg_cols;
+        const int n8 = sg_cols / 8;
+        float acc = 0.f;
+        for (int j = lane; j < n8; j += 32) {
+            const uint4 wv = __ldg(w4 + j);
+            const float w0 = __uint_as_float(wv.x << 16), w1 = __uint_as_float(wv.x & 0xffff0000u);
+            const float w2 = __uint_as_float(wv.y << 16), w3 = __uint_as_float(wv.y & 0xffff0000u);
+            const float w4f = __uint_as_float(wv.z << 16), w5 = __uint_as_float(wv.z & 0xffff0000u);
+            const float w6 = __uint_as_float(wv.w << 16), w7 = __uint_as_float(wv.w & 0xffff0000u);
+            const float4 xa = *(const float4*) (xt + j * 8);
+            const float4 xb = *(const float4*) (xt + j * 8 + 4);
+            acc += w0 * xa.x + w1 * xa.y + w2 * xa.z + w3 * xa.w
+                 + w4f * xb.x + w5 * xb.y + w6 * xb.z + w7 * xb.w;
+        }
+        acc = dwsum(acc);
+        if (lane == 0) sg_out[t] = acc;
+    }
 
     // Warp 0 performs 10 parallel warp-wide argmax passes over the 512 probabilities in shared memory!
     if (warp == 0) {
@@ -1956,4 +1981,26 @@ __global__ void row_top16_multi_kernel(const float* __restrict__ logits, int nvo
         if (out_top16_v) out_top16_v[row * 16 + tid] = s_out_v[tid];
         if (out_top16_i) out_top16_i[row * 16 + tid] = s_out_i[tid];
     }
+}
+
+// Diagnostic (WZY_DBG_TOPS): per-layer, row-0 signature for width-invariance debugging.
+// `out[0]` hashes the row-0 expert selection (`sids[0..TOPK)`), `out[2]` is the bit pattern of the
+// row-0 post-MoE activation sum. Diffing these between W=1 and W>1 shows the FIRST layer where the
+// two paths stop agreeing, and whether that is a discrete routing flip or a float-ordering drift.
+// Single-threaded on purpose: the reduction order must not itself depend on the launch shape.
+__global__ void dbg_probe_layer(const int* __restrict__ sids, const float* __restrict__ comb,
+                                int topk, int ne, unsigned int* __restrict__ out) {
+    unsigned int h = 2166136261u;
+    for (int i = 0; i < topk; ++i) h = (h ^ (unsigned int) sids[i]) * 16777619u;
+    // Value signature: FNV over every element's bit pattern. A plain sum is ill-conditioned here
+    // (the 2560 post-MoE elements cancel), so a sum can match while the vectors differ.
+    unsigned int hv = 2166136261u;
+    float s = 0.f;
+    for (int i = 0; i < ne; ++i) {
+        hv = (hv ^ __float_as_uint(comb[i])) * 16777619u;
+        s += comb[i];
+    }
+    out[0] = h;
+    out[1] = (__float_as_uint(s) >> 16) ^ (__float_as_uint(s) & 0xffffu);
+    out[2] = hv;
 }

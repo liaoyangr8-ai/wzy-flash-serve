@@ -521,6 +521,17 @@ static void init_stage_weights_and_state(StageGpu& s, int dev, int lb, int le, i
         CHECK(cudaHostGetDevicePointer(&s.d_top16_id, s.h_top16_id, 0));
     }
 
+    // Width-invariance probe buffer (WZY_DBG_TOPS) -- allocated for EVERY stage, mapped so the host
+    // can read it after that stage's stream sync without an extra blocking copy.
+    CHECK(cudaHostAlloc(&s.h_dbg_sel, (size_t) s.DBG_SEL_SLOTS * s.DBG_SEL_STRIDE * sizeof(unsigned int),
+                        cudaHostAllocMapped | cudaHostAllocPortable));
+    CHECK(cudaHostGetDevicePointer((void**) &s.d_dbg_sel, s.h_dbg_sel, 0));
+    std::memset(s.h_dbg_sel, 0, (size_t) s.DBG_SEL_SLOTS * s.DBG_SEL_STRIDE * sizeof(unsigned int));
+
+    // Stage A: per-stage handshake epoch (device memory; bumped in-stream at each window end).
+    CHECK(cudaMalloc((void**) &s.d_epoch, 4));
+    CHECK(cudaMemset(s.d_epoch, 0, 4));
+    CHECK(cudaHostAlloc((void**) &s.h_toks_g, 64 * 4, cudaHostAllocMapped | cudaHostAllocPortable));
     CHECK(cudaMalloc(&s.dpos, 4));
     CHECK(cudaMalloc(&s.dmisses, 4));
     CHECK(cudaMalloc(&s.d_hits, 4));
@@ -561,7 +572,11 @@ static void alloc_stage_expert_vram(StageGpu& s) {
     const size_t res_b = reserve_mib * 1024ull * 1024ull;
     const size_t budget = free_b > res_b + 64 * PER ? (free_b - res_b) : (free_b / 2);
     const int max_stage_experts = (s.l_end - s.l_begin) * NEXP;
-    s.cap = std::min((int) (budget / PER), max_stage_experts);
+    // WZY_EXPERT_CAP pins the slot count so the hot/cold expert split is reproducible across runs
+    // and across engines (tests/parity.py compares the batch engine against this one).
+    const int cap_env = std::getenv("WZY_EXPERT_CAP") ? std::atoi(std::getenv("WZY_EXPERT_CAP")) : 0;
+    s.cap = cap_env > 0 ? std::min(cap_env, max_stage_experts)
+                        : std::min((int) (budget / PER), max_stage_experts);
     // The static tier is frozen from --expert-profile; only the adaptive tier can follow the live workload.
     // A profile that mismatches the session therefore pins VRAM to useless experts (measured: 80% vs 94% hit on
     // Chinese compliance text). Keep a smaller frozen core and let most of VRAM adapt (WZY_CORE_KEEP / WZY_ADAPT_SLOTS).
@@ -1060,7 +1075,7 @@ int main() {
     const double boot_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_boot0).count();
     int total_vram_slots = 0;
     for (const auto& stg : stages) total_vram_slots += stg.cap;
-    double prof_enq_ms = 0.0, prof_s0_ms = 0.0, prof_s1_ms = 0.0, prof_mtp_ms = 0.0;
+    double prof_enq_ms = 0.0, prof_s0_ms = 0.0, prof_s1_ms = 0.0, prof_mtp_ms = 0.0, prof_stage_ms = 0.0;
     int prof_wins = 0;
     // ---- Vision (optional): rows produced by `strata-vision` (file: int32 {SVE1,n_tokens,nx,ny,n_embd}
     // then f32 [n_tokens][n_embd], one block per image in prompt order).  The caller expands each image's single
@@ -1126,11 +1141,22 @@ int main() {
         for (int t = 0; t < W; ++t) stage_one_emb(h_emb + (size_t) t * NE, toks[t]);
         inject_img_emb(h_emb, base_pos, W);
         stage_ple_window(toks, W, is_prefill_step || W == 1);
+        const auto tw_stage = std::chrono::steady_clock::now();
+        if (!is_prefill_step) prof_stage_ms += std::chrono::duration<double, std::milli>(tw_stage - tw0).count();
         const bool save_snaps = (!is_prefill_step && W > 1);
 
         CHECK(cudaSetDevice(stages[0].dev));
-        const uint32_t s0_base = stages[0].cold_seq;
         int l0_served = stages[0].l_begin;
+        const uint32_t s0_base = stages[0].cold_seq;
+        // Diagnostic: are the window's host-side inputs (embedding + PLE) identical between W=1 and
+        // W>1 for row 0? If not, the drift is a host bug, not a kernel-ordering one.
+        static const bool dbg_in = std::getenv("WZY_DBG_TOPS") != nullptr;
+        if (dbg_in && !is_prefill_step && W >= 1) {
+            double se = 0.0, sp = 0.0;
+            for (int k = 0; k < NE; ++k) { se += (double) h_emb[k]; sp += (double) h_ple[k]; }
+            std::fprintf(stderr, "[IN] pos=%d W=%d emb0=%.9g emb_sum=%.9g ple0=%.9g ple_sum=%.9g%c",
+                         base_pos, W, (double) h_emb[0], se, (double) h_ple[0], sp, (char) 10);
+        }
         stages[0].record_forward(h_pos, h_emb, h_ple, W, !pp2 && need_logits, save_snaps, host_pack, &cpu_pool, want_top16, 0, false,
                                  nullptr, 0, nullptr, &l0_served, toks);
 
@@ -1410,7 +1436,11 @@ int main() {
         // Measured: drafts beyond ~3 are rejected ~70% of the time while every extra row still costs a full
         // forward + MTP chain step, so gate the chain on confidence (WZY_SPEC_DEPTH_{2..7} to retune).
         static const int wzy_spec_depth = std::getenv("WZY_SPEC_DEPTH") ? std::atoi(std::getenv("WZY_SPEC_DEPTH")) : 5;
-        const float step0_min_p = std::min(0.24f, spec_min_p);
+        // Confidence gate on the very first draft. Measured: below this the chain almost never lands,
+        // but every offered row still costs a full forward + a T*TOPK cold-expert sweep.
+        static const float wzy_spec_min_p = std::getenv("WZY_SPEC_MIN_P")
+                                          ? (float) std::atof(std::getenv("WZY_SPEC_MIN_P")) : 0.30f;
+        const float step0_min_p = std::min(wzy_spec_min_p, spec_min_p);
         if (d_prob < step0_min_p) return;
         if (d_tok == next_toks[n_cells - 1] && d_prob < 0.85f) return;
         drafts_out.push_back(d_tok);
@@ -1976,10 +2006,13 @@ int main() {
             for (int si = 0; si < nstages; ++si) { CHECK(cudaSetDevice(stages[si].dev)); CHECK(cudaStreamSynchronize(stages[si].stream)); }
         }
         const bool no_rep = (std::fabs(cfg.rep_pen - 1.0f) < REP_PEN_EPS);
-        const bool fast_greedy = no_rep && (cfg.temp <= 1e-5f);
+        // WZY_DBG_TOPS=1: disable the GPU-argmax shortcut so the full fp32 logits land on the host,
+        // which lets the verification step print top-1/top-2 and their gap. Diagnostics only.
+        static const bool dbg_tops = std::getenv("WZY_DBG_TOPS") != nullptr;
+        const bool fast_greedy = no_rep && (cfg.temp <= 1e-5f) && !dbg_tops;
         // Only use GPU top-16 fast path when repetition penalty is inactive; otherwise a token outside
         // raw top-16 can enter top-k after higher-ranked tokens are penalized.
-        const bool want_top16 = no_rep && !fast_greedy && (cfg.top_k > 0 && cfg.top_k <= 16);
+        const bool want_top16 = no_rep && !fast_greedy && !dbg_tops && (cfg.top_k > 0 && cfg.top_k <= 16);
         run_verify_window(&ids[nprompt - 1], 1, nprompt - 1, true, true, fast_greedy, want_top16);
         state_tokens.push_back(ids[nprompt - 1]);
 
@@ -2005,7 +2038,7 @@ int main() {
         }
         long long lk0 = 0, vh0 = 0, pr0 = 0;
         for (const auto& s : stages) { lk0 += s.total_lookups; vh0 += s.total_vram_hits; pr0 += s.total_promotions; }
-        prof_enq_ms = prof_s0_ms = prof_s1_ms = prof_mtp_ms = 0.0;
+        prof_enq_ms = prof_s0_ms = prof_s1_ms = prof_mtp_ms = prof_stage_ms = 0.0;
         prof_wins = 0;
         const auto t_dec0 = std::chrono::steady_clock::now();
         static const int wzy_pipe_tok = std::getenv("WZY_PIPE_TOK") ? std::max(0, std::atoi(std::getenv("WZY_PIPE_TOK"))) : 0;
@@ -2030,6 +2063,13 @@ int main() {
         int typ_slack_left = 0;
         static const int typ_max_slack = std::getenv("WZY_TYP_MAX_SLACK")
                                        ? std::atoi(std::getenv("WZY_TYP_MAX_SLACK")) : -1;
+        // Adaptive draft depth. A speculative row is not free: `total_k = T*TOPK` means every extra
+        // row multiplies the per-layer cold-expert lookups, and cold experts are the AVX2 host path.
+        // When the drafter stops landing, fewer rows is strictly cheaper -- verification is untouched,
+        // so this only ever changes how many drafts are *offered*, never the output.
+        static const bool adapt_depth = std::getenv("WZY_ADAPT_DEPTH")
+                                      ? std::atoi(std::getenv("WZY_ADAPT_DEPTH")) != 0 : true;
+        float acc_ema = 0.5f;   // neutral start; per-window draft acceptance, EWMA
         auto verify_one_row = [&](int j, int d_cand, int& sampled) -> bool {
             if (j == 0) typ_slack_left = (typ_max_slack < 0) ? 0x7fffffff : typ_max_slack;
             if (fast_greedy) {
@@ -2041,7 +2081,38 @@ int main() {
                                                 cfg, history, (size_t) nprompt, d_cand, sampled, rng,
                                                 &typ_slack_left);
             } else {
-                return verify_or_resample(h_logits + (size_t) j * NVOCAB, NVOCAB, cfg, history, d_cand, sampled, rng);
+                const bool ok = verify_or_resample(h_logits + (size_t) j * NVOCAB, NVOCAB, cfg, history, d_cand, sampled, rng);
+                if (dbg_tops) {
+                    const float* lg = h_logits + (size_t) j * NVOCAB;
+                    int i1 = 0, i2 = 1;
+                    for (int v = 1; v < NVOCAB; ++v) {
+                        if (lg[v] > lg[i1]) { i2 = i1; i1 = v; }
+                        else if (v != i1 && lg[v] > lg[i2]) { i2 = v; }
+                    }
+                    std::fprintf(stderr, "[DBG] gen=%d row=%d W?draft=%d out=%d top1=%d/%.4f top2=%d/%.4f gap=%.4f\n",
+                                 generated, j, d_cand, sampled, i1, lg[i1], i2, lg[i2], lg[i1] - lg[i2]);
+                }
+                if (dbg_tops) {
+                    // Layer-level signature of row 0: first layer where W=1 and W>1 stop agreeing.
+                    static const int dbg_gen = std::getenv("WZY_DBG_GEN") ? std::atoi(std::getenv("WZY_DBG_GEN")) : 26;
+                    if (j == 0 && generated == dbg_gen) {
+                        for (int si = 0; si < nstages; ++si) {
+                            CHECK(cudaSetDevice(stages[si].dev));
+                            if (stages[si].d_dbg_sel != nullptr) CHECK(cudaStreamSynchronize(stages[si].stream));
+                        }
+                        for (int si = 0; si < nstages; ++si) {
+                            const unsigned int* hs = stages[si].h_dbg_sel;
+                            if (hs == nullptr) continue;
+                            for (int k = 0; k < stages[si].DBG_SEL_SLOTS; ++k) {
+                                const int lg = stages[si].l_begin + k;
+                                if (lg >= stages[si].l_end) break;
+                                std::fprintf(stderr, "[SEL] gen=%d l=%d route=%08x sum=%04x full=%08x%c",
+                                             generated, lg, hs[k * 3], hs[k * 3 + 1], hs[k * 3 + 2], (char) 10);
+                            }
+                        }
+                    }
+                }
+                return ok;
             }
         };
 
@@ -2058,7 +2129,13 @@ int main() {
 
             // With the pipeline on, A's snapshots occupy [0, W) and B's [W, W+W_B), so both must fit in MAX_W.
             const int depth_cap = wzy_pipe_tok > 0 ? std::max(1, MAX_W / 2 - 1) : (MAX_W - 1);
-            const int want_k = std::min(std::min(cfg.spec_k, depth_cap), cfg.max_new - generated);
+            const int want_k_raw = std::min(std::min(cfg.spec_k, depth_cap), cfg.max_new - generated);
+            // Lossless controller: cap the *offered* draft count on a low acceptance rate.
+            int want_k = want_k_raw;
+            if (adapt_depth && want_k > 2) {
+                if (acc_ema < 0.35f) want_k = 2;
+                else if (acc_ema < 0.55f) want_k = std::min(want_k, 3);
+            }
             const int sfx_k = sfx.propose(MAX_W - 1, sfx_buf);
             const int sfx_match = sfx.last_match();
             const auto tm0 = std::chrono::steady_clock::now();
@@ -2102,6 +2179,10 @@ int main() {
                     }
                 }
                 const int acc_rows = std::min(W, 1 + n_acc);
+                if (!drafts.empty()) {
+                    const float win_acc = (float) n_acc / (float) drafts.size();
+                    acc_ema = 0.7f * acc_ema + 0.3f * win_acc;
+                }
                 if (W > 1) {
                     // When `acc_rows == W` (all drafts accepted!), GDN/PLE/QSA states are already committed in-place by the kernels!
                     if (acc_rows < W) {
@@ -2332,11 +2413,11 @@ int main() {
         const long long dlk = lk1 - lk0, dvh = vh1 - vh0, dpr = pr1 - pr0;
         const double hit_rate = dlk > 0 ? (double) dvh / (double) dlk : 1.0;
         if (prof_wins > 0 && std::getenv("WZY_DEC_PROF") != nullptr) {
-            std::fprintf(stderr, "[DEC-PROF gen=%d wins=%d (%.2f tok/win)] total=%.1fms (%.2f ms/win) | enq=%.2fms s0=%.2fms s1=%.2fms mtp=%.2fms (per win: enq=%.2f s0=%.2f s1=%.2f mtp=%.2f) | hit=%.2f%% promo=%lld\n",
+            std::fprintf(stderr, "[DEC-PROF gen=%d wins=%d (%.2f tok/win)] total=%.1fms (%.2f ms/win) | enq=%.2fms s0=%.2fms s1=%.2fms mtp=%.2fms (per win: enq=%.2f s0=%.2f s1=%.2f mtp=%.2f stage=%.2f) | hit=%.2f%% promo=%lld%c",
                          generated, prof_wins, (double) generated / prof_wins, dec_ms, dec_ms / prof_wins,
                          prof_enq_ms, prof_s0_ms, prof_s1_ms, prof_mtp_ms,
                          prof_enq_ms / prof_wins, prof_s0_ms / prof_wins, prof_s1_ms / prof_wins, prof_mtp_ms / prof_wins,
-                         hit_rate * 100.0, dpr);
+                         prof_stage_ms / prof_wins, hit_rate * 100.0, dpr, (char) 10);
         }
         if (json_mode) {
             std::printf("DONE {\"generated\":%d,\"prompt_tokens\":%d,\"reused\":%d,\"prompt_ms\":%.2f,\"decode_ms\":%.2f,\"decode_tps\":%.2f,\"draft_n\":%lld,\"draft_accepted\":%lld,\"vram_hit\":%.4f,\"promoted\":%lld,\"restored_park\":%d,\"parked_tokens\":%d,\"active_tokens\":%d,\"finish\":\"%s\"}\n",

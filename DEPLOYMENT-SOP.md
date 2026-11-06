@@ -68,7 +68,7 @@ nvcc -O3 -std=c++17 -arch=sm_75 -Wno-deprecated-gpu-targets \
 {
   "engine_bin": "/home/liaoyang/wzy-flash-serve/bin/wzy_pp2_engine",
   "model_name": "qwen3.8-flash-next-gptq-nvfp4",
-  "port": 11438,
+  "port": 11437,
   "mirror_ports": [],
   "launcher_port": 11439,
   "auto_load": false,
@@ -155,13 +155,13 @@ nvcc -O3 -std=c++17 -arch=sm_75 -Wno-deprecated-gpu-targets \
 ## 四、WebUI 与多协议 API 使用说明
 
 1. **实时监控与启动器 WebUI**：
-   - 浏览器打开 `http://<服务器IP>:11438/`（或永久控制端口 `http://<服务器IP>:11439/`）。
+   - 浏览器打开 `http://<服务器IP>:11437/`（或永久控制端口 `http://<服务器IP>:11439/`）。
    - 支持一键 **启动 (Start) / 停止并释放 44 GiB 显存 (Stop) / 重启 (Restart) / 在线毫秒级热切换 API 端口**。
    - 实时展示 2 秒滑动窗口瞬时 Decode `tok/s`、新读入 Prefill `tok/s`、MTP 接受率、VRAM 专家命中率、双卡负载/显存/温度/功耗，以及点击任意历史请求查看分离的 `Output` / `Reasoning (<think>)` / `Input` / `Timings JSON`。
 2. **多协议接入（DeepSeek Harness / ZCode / Claude Code / OpenAI SDK / Codex）**：
-   - **OpenAI Chat Completions**: `http://<服务器IP>:11438/v1/chat/completions`
-   - **OpenAI Responses API**: `http://<服务器IP>:11438/v1/responses`
-   - **Anthropic Messages API**: `http://<服务器IP>:11438/v1/messages`
+   - **OpenAI Chat Completions**: `http://<服务器IP>:11437/v1/chat/completions`
+   - **OpenAI Responses API**: `http://<服务器IP>:11437/v1/responses`
+   - **Anthropic Messages API**: `http://<服务器IP>:11437/v1/messages`
    - 内置流式 `OutputParser` 状态机，自动将 `<tool_call>` / `<function=...>` 转换为各协议原生 `tool_calls` / `tool_use` 事件流，零标签泄漏。
 
 ## 五、视觉（图片输入）
@@ -187,7 +187,7 @@ nvcc -O3 -std=c++17 -arch=sm_75 -Wno-deprecated-gpu-targets \
 **调用**：三种协议都支持，图片写成各协议原生块即可。
 
 ```bash
-curl -s http://127.0.0.1:11438/v1/chat/completions -H 'Content-Type: application/json' -d '{
+curl -s http://127.0.0.1:11437/v1/chat/completions -H 'Content-Type: application/json' -d '{
   "model":"qwen3.8-flash-next-gptq-nvfp4","max_tokens":256,"temperature":0,
   "messages":[{"role":"user","content":[
     {"type":"text","text":"图里写的数字是多少？"},

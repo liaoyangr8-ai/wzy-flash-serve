@@ -880,7 +880,7 @@ struct PrefillStageCtx {
 
                 float* l_tail = s.idx_tail.p + (size_t) ql * (IDX_BLK - 1) * IDX_DIM;
                 float* l_dead = s.idx_dead.p + (size_t) ql * IDX_DIM;
-                float* l_pool = s.idx_pooled.p + (size_t) ql * MAX_IDX_BLOCKS * IDX_DIM;
+                float* l_pool = s.idx_pooled.p + (size_t) ql * s.idx_pool_stride * IDX_DIM;
 
                 qsa_indexer_append_multi<<<1, 128, 0, s.stream>>>(
                     idx_raw_pf, w.idx_kn.p, s.cos_tab.p, s.sin_tab.p, s.dpos, l_tail, l_dead, l_pool, s.ctx_max, EPS, B);
@@ -927,7 +927,7 @@ struct PrefillStageCtx {
             tc_gr_read(w.hc_norm[1], w.hc_down[1], w.hc_up[1], w.hc_inj[1], nullptr, nullptr, mixed2_pf, m2_fp16_pf, inj_pf);
             bf16_to_fp16_vec<<<((size_t) NEXP * NE / 2 + 255) / 256, 256, 0, s.stream>>>(w.g_inp.p, s.w_fp16, (size_t) NEXP * NE);
             tc_gemm_fp16(NEXP, NE, B, m2_fp16_pf, slog_pf);
-            router_top10_fast_multi<<<B, 256, 0, s.stream>>>(slog_pf, sids_pf, swts_pf);
+            router_top10_fast_multi<<<B, 256, 0, s.stream>>>(slog_pf, sids_pf, swts_pf, nullptr, nullptr, nullptr, 0);
 
             CHECK(cudaMemsetAsync(exp_cnt_pf, 0, NEXP * 4, s.stream));
             pf_moe_count_kernel<<<(total_k + 255) / 256, 256, 0, s.stream>>>(sids_pf, total_k, exp_cnt_pf);

@@ -24,6 +24,7 @@ import tokenizer as tk  # noqa: E402
 import frontend as fe  # noqa: E402
 import responses as rp  # noqa: E402
 import vision as vision_mod  # noqa: E402
+import engine_client as engine_client_mod  # noqa: E402
 
 class LoopGuard:
     """Detect degenerate repetition in a token stream.
@@ -173,6 +174,23 @@ class EngineSupervisor:
         self.cfg = cfg
         self.config_path = config_path
         self.bin_path = cfg["engine_bin"]
+        # Concurrent batch engine (optional): a separate binary that keeps N sessions resident and
+        # decodes them on private streams. When enabled the supervisor stops serialising requests and
+        # talks to the engine through a multiplexed client keyed by request id.
+        batch_cfg = cfg.get("batch") or {}
+        self.batch_mode = bool(batch_cfg.get("enabled", False))
+        self.batch_slots = int(batch_cfg.get("slots", 2))
+        self.batch_ctx = int(batch_cfg.get("ctx", 32768))
+        if self.batch_mode and batch_cfg.get("engine_bin"):
+            self.bin_path = batch_cfg["engine_bin"]
+        self.client = None
+        self.stats_lock = threading.Lock()
+        self.busy_count = 0
+        # Batch mode runs several requests at once; each keeps its own telemetry record and
+        # `current_stat` points at the most recently admitted one.
+        self.req_stats = {}
+        self._rid_lock = threading.Lock()
+        self._rid = 0
         self.lock = threading.Lock()
         self.state_lock = threading.Lock()
         self.proc = None
@@ -221,7 +239,24 @@ class EngineSupervisor:
         env = os.environ.copy()
         for k, v in self.cfg.get("env", {}).items():
             env[k] = str(v)
+        if self.batch_mode:
+            # The batch engine has no 256K host KV mirror: its ring is the whole context. Sessions
+            # share one expert cache, so WZY_LEAVE_MIB is set by the engine itself from WZY_BATCH.
+            env["WZY_CTX"] = str(self.batch_ctx)
+            env["WZY_BATCH"] = str(self.batch_slots)
+            env.setdefault("WZY_CPU_THREADS", "14")
         return env
+
+    def next_rid(self):
+        with self._rid_lock:
+            self._rid += 1
+            if self._rid >= 2000000000:
+                self._rid = 1
+            return self._rid
+
+    def _loop_guard(self):
+        on, gram, repeats, window = loop_guard_config()
+        return LoopGuard(gram, repeats, window) if on else None
 
     def save_config(self):
         try:
@@ -337,6 +372,10 @@ class EngineSupervisor:
                     self.boot_info["elapsed_s"] = round(time.time() - self.boot_info["started"], 2)
                     self.conv_cache.clear()
                     self.session_slots = {"active_tokens": 0, "parked_tokens": 0, "park_restores": 0}
+                    if self.batch_mode:
+                        # Hand stdout over to the multiplexed reader: from here on, request handlers
+                        # submit concurrently and wait on their own queues.
+                        self.client = engine_client_mod.EngineClient(proc, self._log)
                     self._log(f"[wzy-serve] engine READY: {self.ready_info}")
                     self._ready_ev.set()
                     return
@@ -366,10 +405,12 @@ class EngineSupervisor:
             proc = self.proc
             if proc is None or proc.poll() is not None:
                 self.proc = None
+                self.client = None
                 self.state = "stopped"
                 self.ready_info = {}
                 self.busy = False
                 self.current_stat = {}
+                self.req_stats.clear()
                 self.boot_info["stage"] = "已停止 (显存已释放)"
                 self.boot_info["pct"] = 0
                 return {"ok": True, "status": "unloaded", "state": "stopped", "message": "引擎已处于停止状态"}
@@ -396,10 +437,13 @@ class EngineSupervisor:
                 except Exception:
                     pass
             self.proc = None
+            self.client = None
             self.state = "stopped"
             self.ready_info = {}
             self.busy = False
+            self.busy_count = 0
             self.current_stat = {}
+            self.req_stats.clear()
             self.conv_cache.clear()
             self.session_slots = {"active_tokens": 0, "parked_tokens": 0, "park_restores": 0}
             self.boot_info["stage"] = "已停止 (44 GiB 双卡显存已全部释放)"
@@ -433,6 +477,10 @@ class EngineSupervisor:
 
     def save_profile(self):
         """Persist the learned expert heat into expert-profile-cjk.bin (engine `SAVE_PROFILE` command)."""
+        if self.batch_mode:
+            # The batch engine has no SAVE_PROFILE command; answering here would steal a line from the
+            # multiplexed stdout reader. Report "not supported" instead of hanging.
+            return False
         with self.lock:
             if self.proc is None or self.proc.poll() is not None or self.state != "ready":
                 return False
@@ -445,6 +493,12 @@ class EngineSupervisor:
                 self._log(f"[wzy-serve] save_profile failed: {e}")
                 return False
     def reset_state(self):
+        if self.batch_mode:
+            # Sessions stay resident; there is nothing to reset on the engine side.
+            with self.lock:
+                self.conv_cache.clear()
+                self.session_slots = {"active_tokens": 0, "parked_tokens": 0, "park_restores": 0}
+            return True
         with self.lock:
             self.conv_cache.clear()
             self.session_slots = {"active_tokens": 0, "parked_tokens": 0, "park_restores": 0}
@@ -682,6 +736,12 @@ class EngineSupervisor:
 
     def generate_stream(self, ids, params, meta=None):
         """Yields ('prefill', dict) | ('token', int) | ('done', dict) under engine lock."""
+        if self.batch_mode:
+            # Concurrent path: requests are multiplexed by id, so handlers must NOT serialise on
+            # self.lock here. Lifecycle (start/stop) still takes it.
+            yield from engine_client_mod.generate_stream_batch(
+                self, ids, params, meta, self._loop_guard())
+            return
         meta = meta or {}
         req_id = meta.get("id") or ("req-" + uuid.uuid4().hex[:12])
         req_obj = {

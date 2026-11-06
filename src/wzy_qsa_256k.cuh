@@ -5,7 +5,14 @@
 static constexpr int KV_GRP = 64;             // INT8 KV group size: 1 fp16 scale per 64 elements
 static constexpr int KV_SC_PER_CELL = KVD / KV_GRP; // 512 / 64 = 8 fp16 scales per cell
 static constexpr int KV_SINK_PIN = 4096;      // permanently pinned System-Prompt / Attention-Sink cells in GDDR6!
-static constexpr int KV_VRAM_RING = 32768;    // 4096 pinned sink + 28672 sliding ring (~198 MiB/GPU for 6 QSA layers)
+// VRAM-resident KV window. Everything older than this lives in the pinned host mirror and is gathered
+// over PCIe by `pf_qsa_wmma_sparse_attn` (12 query heads share one read). Raising it therefore directly
+// removes long-context PCIe traffic, at ~34.6 MiB per QSA layer per 32768 cells.
+//   build.sh:  -DWZY_KV_RING=65536   ->  +415 MiB/GPU, host gap at 70K drops from 37.9K to 6.7K cells
+#ifndef WZY_KV_RING
+#define WZY_KV_RING 32768
+#endif
+static constexpr int KV_VRAM_RING = WZY_KV_RING;    // 4096 pinned sink + sliding ring
 
 __device__ __forceinline__ size_t kv_vram_slot(int p, int ring_cap) {
     if (ring_cap <= KV_SINK_PIN * 2) return (size_t) (p % ring_cap);

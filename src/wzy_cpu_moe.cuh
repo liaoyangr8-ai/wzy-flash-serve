@@ -33,14 +33,23 @@ struct alignas(64) ColdLayerReq {
 //   1) VRAM-resident groups (`slot >= 0`) -> `grp_slot, grp_cnt, grp_e, d_ngroups` (processed by GPU at 616 GB/s GDDR6)
 //   2) Cold host groups (`slot < 0`) -> UVA pinned `req` (processed in parallel by 16 AVX2+FMA CPU threads at 19 GB/s DDR3)
 // Also zeroes `res_swts[e]` when `dslots[e] < 0` so `moe_combine_shared_multi` on the GPU sums ONLY resident experts!
+// Stage A (README 7.12): advance the handshake epoch by one window's worth of layer ids. Enqueued at
+// the END of the window in the same stream, so every handshake kernel of the window has already read
+// the old base (a host-side write at window entry was racy -- take 3 of this experiment).
+__global__ void bump_epoch_kernel(unsigned int* epoch, unsigned int step) { *epoch += step; }
+
 __global__ void split_route_hit_cold_kernel(
     const int* __restrict__ sids, const float* __restrict__ swts, int T,
     const int* __restrict__ d_lut, int layer,
     int* __restrict__ dslots, float* __restrict__ res_swts,
     int* __restrict__ grp_slot, int* __restrict__ grp_cnt, int* __restrict__ grp_e, int* __restrict__ d_ngroups,
     const signed char* __restrict__ eq16, const float* __restrict__ es16,
-    ColdLayerReq* __restrict__ req, uint32_t seq_id,
+    ColdLayerReq* __restrict__ req, const uint32_t* __restrict__ d_epoch, int lay_off,
     int static_cap = 0, uint8_t* __restrict__ d_adapt_ref = nullptr, int* __restrict__ d_ncold_out = nullptr) {
+    // Stage A (README 7.12): handshake id from the device epoch (the window base) instead of a baked
+    // scalar, so the window is capturable as a CUDA graph. The epoch is bumped in-stream at the
+    // window end, so this value is constant for every kernel of the window.
+    const uint32_t seq_id = (*d_epoch) + (uint32_t) lay_off + 1u;
     const int eid = threadIdx.x; // 0..511
     const int total_k = T * TOPK;
     __shared__ int s_ncold;
@@ -153,8 +162,10 @@ __global__ void add_cold_out_kernel(float* __restrict__ comb, const float* __res
 }
 
 __global__ void wait_and_add_cold_out_kernel(float* __restrict__ comb, const volatile float* __restrict__ cold_out,
-                                             const volatile ColdLayerReq* __restrict__ req, uint32_t seq_id, int n,
+                                             const volatile ColdLayerReq* __restrict__ req, const uint32_t* __restrict__ d_epoch,
+                                             int lay_off, int n,
                                              const int* __restrict__ d_ncold = nullptr) {
+    const uint32_t seq_id = (*d_epoch) + (uint32_t) lay_off + 1u;   // Stage A: identical to old `seq`
     if (d_ncold != nullptr) {
         if (*d_ncold <= 0) return; // 100% VRAM hit -> 1-cycle GPU L2 cache fast exit (ZERO PCIe traffic!)
     } else {

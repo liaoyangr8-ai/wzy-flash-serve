@@ -18,7 +18,7 @@ elif [[ "${1:-}" =~ ^[0-9]+$ ]]; then
   CLI_PORT="$1"
 fi
 
-PORT=$("$UV_PY" -c 'import json,sys; c=json.load(open("config.json")); print(sys.argv[1] or c.get("port",11438))' "$CLI_PORT")
+PORT=$("$UV_PY" -c 'import json,sys; c=json.load(open("config.json")); print(sys.argv[1] or c.get("port",11437))' "$CLI_PORT")
 LPORT=$("$UV_PY" -c 'import json; c=json.load(open("config.json")); print(c.get("launcher_port",11439))')
 
 check_ready() {
